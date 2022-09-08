@@ -8,20 +8,17 @@
 from aws_lambda_powertools.logging.logger import Logger, set_package_logger
 from aws_lambda_powertools.logging.formatter import LambdaPowertoolsFormatter
 import json
-import csv
 import pandas as pd
 import boto3
 import argparse
 from aws_lambda_powertools import Logger
 import requests
 
-# Holds processed result from Kendra
-
-TEST_DATASET= []
+TEST_DATASET = []
 OPERATION_MODE = ""
-eve_endpoint=""
-session = None
-region = ""
+EVE_ENDPOINT = ""
+SESSION = None
+REGION = None
 
 class MyFormatter(LambdaPowertoolsFormatter):
     def __init__(self):
@@ -56,7 +53,7 @@ def is_good_response(response):
 
 
 def send_simple_query_kendra(query_text=None):
-    kendra_client = session.client('kendra', region_name=region)
+    kendra_client = SESSION.client('kendra', region_name=REGION)
     response = kendra_client.query(
         IndexId=KENDRA_INDEX_ID,
         QueryText=query_text,
@@ -89,59 +86,64 @@ def run_test_case(filename=None):
         question = row[2].strip()
         test_case["persona"] = persona
         test_case["question"] = question
-        if (OPERATION_MODE=="EVE"):
+
+        if OPERATION_MODE == "EVE":
             test_case["intent"] = get_eve_intent(question)
             test_case["eve_results"] = get_eve_results(question)
             test_case["kendra_results"] = get_kendra_results(question, test_case["intent"])
-        else:  
+        else:
+            test_case["intent"] = ""
+            test_case["eve_results"] = ""
             test_case["kendra_results"] = get_kendra_results(question)
+
         TEST_DATASET.append(test_case)      # save the test case in the final list
-    
+
     # now push the list to a bucket
     write_results(TEST_DATASET)
 
 
 def get_eve_intent(question):
-    r = requests.get(eve_endpoint + "?utterance=" + question)
+    r = requests.get(EVE_ENDPOINT + "?utterance=" + question)
     print(r.text)
     return r.text
 
 
 def get_eve_results(question):
-    r = requests.get(eve_endpoint + "?utterance=" + question)
+    r = requests.get(EVE_ENDPOINT + "?utterance=" + question)
     print(r.text)
     return r.text
 
 
 def get_kendra_results(question, intent=""):
-    if intent=="":
+    if intent == "":
         results = send_simple_query_kendra(query_text=question)
         return parse_kendra_results(results)
-    else:
-        # use intent before kendta
-        print(intent)
+    # else:
+        # results = send_intent_query_kendra(query_text=question, intent)
+        # return parse_kendra_results(results)
+
 
 def parse_kendra_results(raw_response):
     obj = json.loads(raw_response)
     counter = 1
     results = []
     for result in obj["ResultItems"]:
-        if counter==3: 
+        if counter==3:
             return results
         else:
             results.append(result)
             counter = counter + 1
-
+    print(result)
     return results
 
 
 def write_results(dataset):
     # first create csv, then upload to s3
-   s3_client = session.client('s3', region_name=region)
-   df = pd.DataFrame(dataset)
-   csv_data = df.to_csv(index=False)
+    s3_client = SESSION.client('s3', region_name=REGION)
+    df = pd.DataFrame(dataset)
+    csv_data = df.to_csv(index=False)
 
-   # Structure: persona, question, eve_result1,eve_result2,eve_result3, kendra_result1, kendra_result2, kendra_result3
+    # Structure: persona, question, eve_result1,eve_result2,eve_result3, kendra_result1, kendra_result2, kendra_result3
     # structure remains the same, even if some items has no value - we put in empty text
 def main():
     parser = argparse.ArgumentParser(description='Kendra Query Manager',
@@ -151,7 +153,7 @@ def main():
 
     parser.add_argument('-r', '--region', help='target aws account region', default='us-east-1')
     parser.add_argument('-o', '--operation', help='DIRECT/EVE', default='DIRECT')
-    parser.add_argument('-ep', '--endpoint' help="end point of eve")
+    parser.add_argument('-ep', '--endpoint', help="Eve endpoint of eve", default='None')
     parser.add_argument('-p', '--profile', help='account profile to assume credentials', required=True)
     parser.add_argument('-s', '--search', required=False, help='specify text to search')
     parser.add_argument('-f', '--file', required=False, help='specify file path of type csv')
@@ -160,27 +162,27 @@ def main():
 
     args = parser.parse_args()
     logger.info(args)
-    OPERATION_MODE=args.operation
+    OPERATION_MODE = args.operation
+    EVE_ENDPOINT = args.endpoint
+    REGION = args.region
 
     # Get temporary credential from current session to execute api calls against target account
-
-    session = boto3.Session(profile_name=args.profile, region_name=args.region)
-    region = args.region
-    sts_client = session.client('sts', region_name=args.region)
+    SESSION = boto3.Session(profile_name=args.profile, region_name=REGION)
+    sts_client = SESSION.client('sts', region_name=REGION)
     logger.info(sts_client.get_caller_identity())
 
-    eve_endpoint = args.endpoint
+
 
     if args.action == 'send-simple-query':
         if not args.search:
             logger.error("missing required option: args.search")
         else:
-            send_simple_query(kendra_client, args.search)
+            send_simple_query_kendra(args.search)
     elif args.action == 'run-test-case':
         if not args.file:
             logger.error("missing required option: args.file")
         else:
-            send_query_set_csv(kendra_client, args.file)
+            run_test_case(args.file)
 
 
 if __name__ == "__main__":
